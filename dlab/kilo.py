@@ -108,7 +108,7 @@ def oeaudio_to_trials(
     sync_thresh: float = 1.0,
     prepad: float = 1.0,
     stimulus_lookup: dict = {},
-    rec_idx: list = [],
+    recording_interval: list = [0, None],
 ) -> Iterator[Trial]:
     """Extracts trial information from an oeaudio-present experiment ARF file
 
@@ -170,6 +170,9 @@ def oeaudio_to_trials(
         dset_offset = sync.attrs["offset"]
         dset_end = sync.size
         sampling_rate = sync.attrs["sampling_rate"]
+        sync_start = int(recording_interval[0]*sampling_rate)
+        sync_end = int(recording_interval[1]*sampling_rate)
+        log.info(f"  - sync channel start and stop times: {recording_interval[0]}, {recording_interval[1]}")
         stim_sample_offset = int(dset_offset * sampling_rate)
         log.info("  - recording clock offset: %d", stim_sample_offset)
 
@@ -197,19 +200,20 @@ def oeaudio_to_trials(
                     "  - WARNING: stimulus %s is longer than the duration of the trial",
                     stim,
                 )
-            if onset>rec_idx[0] or offset<rec_idx[1]:
+            if onset<sync_start or (onset+stim_samples)>sync_end:
                 log.warning(
-                    f"  - WARNING: skipping trial of {stim} between {onset} and {offset}"
+                    f"  - WARNING: skipping trial of {stim.name} between {onset/sampling_rate} and {offset/sampling_rate}"
                 )
                 continue
+            # calibrate trial time with sorting start offset
             trials.append(
                 Trial(
                     entry_num,
-                    onset - padding_samples,
-                    offset - padding_samples,
+                    onset - padding_samples - sync_start,
+                    offset - padding_samples - sync_start,
                     stim.name,
-                    onset,
-                    onset + stim_samples,
+                    onset - sync_start,
+                    onset + stim_samples - sync_start,
                 )
             )
     return trials
@@ -264,7 +268,7 @@ def group_spikes_script(argv=None):
     from dlab.extracellular import entry_metadata, iter_entries
     from dlab.util import json_serializable, setup_log
 
-    version = "2024.01.29"
+    version = "2025.09.03"
 
     p = argparse.ArgumentParser(
         description="group kilosorted spikes into pprox files based on cluster and trial"
@@ -300,10 +304,16 @@ def group_spikes_script(argv=None):
         help="sets trial start time relative to stimulus onset (default %(default)0.1f s)",
     )
     p.add_argument(
-        "--recording-interval",
-        type=list,
-        default=[0, None],
-        help="duration [start:end] of recording on which spike sorting was performed. Use None for end slice"
+        "--recording-start",
+        type=int,
+        default=0,
+        help="start time (s) of recording on which spike sorting was performed. Use None for end slice"
+    )
+    p.add_argument(
+        "--recording-stop",
+        type=int,
+        default=None,
+        help="stop time (s) of recording on which spike sorting was performed"
     )
     p.add_argument(
         "--toelis",
@@ -429,17 +439,14 @@ def group_spikes_script(argv=None):
     recording = np.reshape(
         recording, (recording.size // params["nchannels"], params["nchannels"])
     )
-    if args.recording_interval != [0, None]:
-        start = args.recording_interval[0]
-        end = args.recording_interval[1]
-        start_idx = int(start*params['sampling_rate'])
-        end_idx = int(end*params['sampling_rate']) if end is not None else None
-        log.info("  - recording interval between %d seconds", [start, end])
-        recording = recording[start_idx:end_idx, :]
-        rec_idx = [start_idx, end_idx]
-    else:
-        rec_idx = [0, recording.shape[0]]
-        
+
+    # recording_duration might be shorter than arf duration, if sorting time < recorded time
+    recording_duration = recording.shape[0]/params['sampling_rate'] # in seconds
+    # here we calculate the start and end times with respect to the arf file
+    start = args.recording_start
+    end = args.recording_stop if args.recording_stop is not None else recording_duration+start
+    recording_interval = [start, end]
+
     nsamples, nchannels = recording.shape
     log.info("  - filtered recording: %s", recfile)
     log.info("    - %d samples, %d channels", nsamples, nchannels)
@@ -478,7 +485,7 @@ def group_spikes_script(argv=None):
         trials = pd.DataFrame(
             oeaudio_to_trials(afp, stim_finder, args.sync,
                               args.sync_thresh, args.prepad,
-                              stimulus_lookup, rec_idx)
+                              stimulus_lookup, recording_interval)
         )
         entry_attrs = tuple(entry_metadata(e) for _, e in iter_entries(afp))
 
@@ -520,12 +527,15 @@ def group_spikes_script(argv=None):
         # remove artifact spikes
         n_before = int(args.waveform_pre_peak * params["sampling_rate"] / 1000)
         n_after = int(args.waveform_post_peak * params["sampling_rate"] / 1000)
-        spikes = cluster[
+        start_offset = int(start*params['sampling_rate'])
+        nsamples, nchannels = recording.shape
+        cluster = cluster[
             (cluster.time > n_before) & (cluster.time < (nsamples - n_after))
-        ]
+        ] # drop spikes outside of range, this affects the number of total spikes
+
         waveforms = qs.peaks(
             recording[:, clust_info["ch"]],
-            spikes.time,
+            cluster.time,
             n_before=n_before,
             n_after=n_after,
         )
@@ -533,6 +543,7 @@ def group_spikes_script(argv=None):
         included = np.abs(waveforms).max(-1) < (
             np.abs(mean_spike).max(-1) * args.artifact_reject_thresh
         )
+        log.info(f"Waveforms length {len(waveforms)}")
         n_included = included.sum()
         if n_included == 0:
             log.warning("   - all spikes marked as artifacts (sorting error?)")
