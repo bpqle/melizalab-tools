@@ -122,7 +122,7 @@ def iter_entries(data_file):
 
 def find_stim_dset(entry):
     """Returns the first dataset that matches 'Network_Events.*_TEXT'"""
-    rex = re.compile(r"Network_Events-.*?TEXT")
+    rex = re.compile(r"MessageCenter")
     for name in entry:
         if rex.match(name) is not None:
             log.debug("  - stim log dataset: %s", name)
@@ -702,8 +702,12 @@ def group_spikes_script(argv=None):
             log.warning("   - all spikes marked as artifacts (sorting error?)")
             continue
         elif n_included < n_spikes:
-            cluster = cluster[included]
-            waveforms = waveforms[included]
+            try:
+                cluster = cluster[included]
+                waveforms = waveforms[included]
+            except ValueError:
+                log.warning(f"Cluster len {len(cluster)} & Waveforms len {len(waveforms)}. N_included={n_included}")
+                raise
             log.info("    - %d artifact spike(s) excluded", n_spikes - n_included)
             # aggregate spikes by trial and left join to trial information table
             # - empty trials will be nan
