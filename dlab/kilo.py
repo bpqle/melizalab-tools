@@ -1,18 +1,22 @@
 # -*- mode: python -*-
-""" Functions for using kilosort/phy data """
+"""Functions for using kilosort/phy data"""
+
+import io
+import datetime
 import json
 import logging
 import re
+from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, NamedTuple, Optional
+from typing import NamedTuple
 
+import arf
 import ewave
 import h5py as h5
 import numpy as np
 import pandas as pd
 import quickspikes as qs
 import toelis
-from httpx import HTTPStatusError
 
 from dlab import neurobank as nbank
 from dlab import pprox
@@ -35,10 +39,10 @@ class Trial(NamedTuple):
 class Stimulus(NamedTuple):
     name: str
     start: int
-    end: Optional[int] = None
+    end: int | None = None
 
 
-def read_kilo_params(fname: Path) -> Dict:
+def read_kilo_params(fname: Path) -> dict:
     """Read the kilosort params.py file"""
     from configparser import ConfigParser
     from itertools import chain
@@ -73,14 +77,103 @@ def oeaudio_stims(dset: h5.Dataset, stimulus_lookup) -> Iterator[Stimulus]:
             yield Stimulus(stim_name, time)
 
 
+def oeaudio_log_stims(
+    oeaudio_log: io.TextIOBase, sampling_rate: int
+) -> Iterator[Stimulus]:
+    """Parse an open-ephys-audio log to get a table of stimuli with start
+    samples. This function can be used when the 'stim' dataset is missing from
+    the recording (e.g., during the time period when we were falsely assuming
+    that the new version of the NetworkEvents plugin was storing these
+    messages)"""
+    re_start = re.compile(r'"start (.*)"')
+    start_acq_time = None
+    for i, line in enumerate(oeaudio_log):
+        stripped = line.strip()
+        if stripped.startswith("#") or len(stripped) == 0:
+            continue
+        timestamp, message = stripped.split(",", maxsplit=1)
+        try:
+            ts = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError as err:
+            log.warning("      - line %d: error parsing timestampe: %s", i, err)
+            continue
+        if message == '"StartAcquisition"':
+            start_acq_time = ts
+            log.debug("      - acquisition started at %s", ts)
+            continue
+        m = re_start.match(message)
+        if m is not None:
+            offset = (ts - start_acq_time).total_seconds() * sampling_rate
+            stim_name = Path(m.group(1)).stem
+            yield Stimulus(stim_name, int(offset))
+
+
+def entry_time(entry):
+    """Return the timestamp of an entry as a floating point number"""
+    from arf import timestamp_to_float
+
+    return timestamp_to_float(entry.attrs["timestamp"])
+
+
+def iter_entries(data_file):
+    """Iterate through the entries in an arf file in order of time"""
+    return enumerate(sorted(data_file.values(), key=entry_time))
+
+
+def find_stim_dset(entry):
+    """Returns the first dataset that matches 'Network_Events.*_TEXT'"""
+    rex = re.compile(r"Network_Events-.*?TEXT")
+    for name in entry:
+        if rex.match(name) is not None:
+            log.debug("  - stim log dataset: %s", name)
+            return entry[name]
+
+
+def entry_metadata(entry):
+    """Extracts metadata from an entry in an oeaudio-present experiment ARF file.
+
+    Metadata are passed to open-ephys through the network events socket as a
+    json-encoded dictionary. There should be one and only one metadata message
+    per entry, so only the first is returned.
+
+    """
+    re_metadata = re.compile(r"metadata: (\{.*\})")
+    stim_dset = find_stim_dset(entry)
+    if stim_dset is None:
+        log.warning(
+            "  - no stimulus log dataset in %s; not saving entry metadata", entry.name
+        )
+        # use sampling rate in the first sampled dataset
+        for dset_name in entry:
+            try:
+                sampling_rate = entry[dset_name].attrs["sampling_rate"]
+                return {"sampling_rate": sampling_rate}
+            except KeyError:
+                pass
+        log.warning("  - unable to infer sampling rate for the entry")
+        return {"sampling_rate": "unknown"}
+    for row in stim_dset:
+        message = row["message"].decode("utf-8")
+        m = re_metadata.match(message)
+        try:
+            metadata = json.loads(m.group(1))
+        except (AttributeError, json.JSONDecodeError):
+            pass
+        else:
+            metadata.update(
+                name=entry.name, sampling_rate=stim_dset.attrs["sampling_rate"]
+            )
+            return metadata
+
+
 class StimulusFinder:
     """Looks up stimuli using neurobank and/or files in a local directory"""
 
-    def __init__(self, nbank_registry_url: str, alt_base: Optional[Path] = None):
+    def __init__(self, nbank_registry_url: str, alt_base: Path | None = None):
         self.registry_url = nbank_registry_url
         self.alt_base = alt_base
 
-    def get_durations(self, names: Iterable[str]) -> Dict[str, float]:
+    def get_durations(self, names: Iterable[str]) -> dict[str, float]:
         """Looks up durations (in s) for a sequence of stimuli. Searches
         neurobank first and then tries local directory.
 
@@ -107,8 +200,9 @@ def oeaudio_to_trials(
     sync_dset: str,
     sync_thresh: float = 1.0,
     prepad: float = 1.0,
-    stimulus_lookup: dict = {},
     recording_interval: list = [0, None],
+    *,
+    oeaudio_log: Path | None,
 ) -> Iterator[Trial]:
     """Extracts trial information from an oeaudio-present experiment ARF file
 
@@ -126,43 +220,33 @@ def oeaudio_to_trials(
     The `prepad` parameter specifies, in seconds, when trials begin relative to
     stimulus onset. The default is 1.0 s.
 
+    If oeaudio_log is set, it's used instead of the network event datasets.
+
     """
     from itertools import zip_longest
-
-    from dlab.extracellular import (
-        entry_datetime,
-        entry_time,
-        find_stim_dset,
-        iter_entries,
-    )
 
     expt_start = None
     det = qs.detector(sync_thresh, 10)
     trials = []
+
     for entry_num, entry in iter_entries(data_file):
         log.info(" - entry: '%s'", entry.name)
-        entry_start = entry_time(entry)
-        log.info("  - start time: %s", entry_datetime(entry))
+        entry_start = arf.timestamp_to_float(entry.attrs["timestamp"])
+        log.info(
+            "  - start time: %s", arf.timestamp_to_datetime(entry.attrs["timestamp"])
+        )
         if expt_start is None:
             expt_start = entry_start
 
-        log.info("  - parsing stimulus log")
-        entry_stimuli = list(oeaudio_stims(find_stim_dset(entry), stimulus_lookup))
-        try:
-            stim_durations = stim_finder.get_durations(
-                stim.name for stim in entry_stimuli
-            )
-        except FileNotFoundError as err:
-            raise RuntimeError(
-                "unable to find a stimulus to look up duration. Was it deposited in neurobank?"
-            ) from err
-        except KeyError as err:
-            raise RuntimeError(
-                "a stimulus was not found in stimulus lookup table"
-            ) from err
-        log.info("    - detected %d stimuli", len(entry_stimuli))
         log.info("  - sync track: '%s'", sync_dset)
-        sync = entry[sync_dset]
+        try:
+            sync = entry[sync_dset]
+        except KeyError as err:
+            available_tracks = ", ".join(entry.keys())
+            raise RuntimeError(
+                f"unable to find sync track. Use --sync to configure. Options are: {available_tracks}"
+            ) from err
+
         sync_data = sync[:].astype("d")
         det.scale_thresh(sync_data.mean(), sync_data.std())
         stim_onsets = np.asarray(det(sync_data))
@@ -176,15 +260,28 @@ def oeaudio_to_trials(
         stim_sample_offset = int(dset_offset * sampling_rate)
         log.info("  - recording clock offset: %d", stim_sample_offset)
 
-        if len(entry_stimuli) != stim_onsets.size:
-            logging.error(
-                "  - Number of stimuli: %s is different from number of clicks: %s",
-                len(entry_stimuli),
-                stim_onsets.size,
+        if oeaudio_log is not None:
+            log.info("  - parsing stimulus log from %s", oeaudio_log)
+            entry_stimuli = list(oeaudio_log_stims(open(oeaudio_log), sampling_rate))
+        else:
+            stim_dset = find_stim_dset(entry)
+            if stim_dset is None:
+                raise RuntimeError(
+                    "unable to find stimulus list in ARF file. You may need to provide the oeaudio logfile"
+                )
+            log.info("  - parsing stimulus log from %s", stim_dset)
+            entry_stimuli = list(oeaudio_stims(stim_dset))
+        try:
+            stim_durations = stim_finder.get_durations(
+                stim.name for stim in entry_stimuli
             )
-            raise ValueError(
-                "  - Error: number of stimuli not equal to number of clicks. Either discard recording or change sync threshold."
-            )
+        except FileNotFoundError as err:
+            raise RuntimeError(
+                "unable to find a stimulus to look up duration. Was it deposited in neurobank?"
+            ) from err
+        log.info("    - detected %d stimuli", len(entry_stimuli))
+
+        entry_stimuli = match_clicks(entry_stimuli, stim_onsets)
 
         padding_samples = int(prepad * sampling_rate)
         for stim, onset, offset in zip_longest(
@@ -217,6 +314,51 @@ def oeaudio_to_trials(
                 )
             )
     return trials
+
+
+def match_clicks(entry_stimuli, stim_onsets):
+    """Match clicks in the sync track to the stimulus onset log.
+
+    If the number of clicks matches the number of stimuli, nothing happens. If
+    there are more clicks than stimuli, this is an error. If there are more
+    stimuli than clicks, attempts to match each click with the next onset,
+    discarding any stimuli that don't have a matching click.
+
+    """
+    if len(entry_stimuli) == stim_onsets.size:
+        logging.debug(" - Number of stimuli matches number of clicks")
+        return entry_stimuli
+    elif len(entry_stimuli) < stim_onsets.size:
+        logging.error(
+            "  - Number of stimuli (%d) is fewer than the number of clicks (%d)",
+            len(entry_stimuli),
+            stim_onsets.size,
+        )
+        raise ValueError(
+            "  - Error: unable to match clicks in the sync track with the stimulus list. Either discard recording or change sync threshold."
+        )
+    logging.info(
+        "  - Number of stimuli (%d) is greater than number of clicks (%d). Trying to repair.",
+        len(entry_stimuli),
+        stim_onsets.size,
+    )
+    # this algorithm assumes that the click comes before the message, which is
+    # pretty reasonable given that network delays will be longer than analog
+    # signal propagation.
+    matched_stims = []
+    click_times = set(stim_onsets)
+    for i, stim in enumerate(entry_stimuli):
+        idx = np.searchsorted(stim_onsets, stim.start)
+        closest = stim_onsets[idx - 1]
+        logging.info(
+            "   - stim %d (start=%d) matched to click at %d", i, stim.start, closest
+        )
+        if closest in click_times:
+            matched_stims.append(stim)
+            click_times.remove(closest)
+        else:
+            logging.info("     - this click was already used, dropping the trial")
+    return matched_stims
 
 
 def assign_events_flat(events: pd.DataFrame, sampling_rate: float):
@@ -264,11 +406,10 @@ def group_spikes_script(argv=None):
     import argparse
     import os
 
-    from dlab.core import __version__
-    from dlab.extracellular import entry_metadata, iter_entries
+    from dlab import __version__
     from dlab.util import json_serializable, setup_log
 
-    version = "2025.09.03"
+    version = "2026.06.22"
 
     p = argparse.ArgumentParser(
         description="group kilosorted spikes into pprox files based on cluster and trial"
@@ -296,6 +437,11 @@ def group_spikes_script(argv=None):
         default=30.0,
         type=float,
         help="threshold (z-score) for detecting sync clicks (default %(default)0.1f)",
+    )
+    p.add_argument(
+        "--oeaudio-log",
+        type=Path,
+        help="use an open-ephys-audio logfile to determine list of stimuli instead of using network messages",
     )
     p.add_argument(
         "--prepad",
@@ -471,7 +617,7 @@ def group_spikes_script(argv=None):
         if not args.dry_run:
             with open(outfile, "w") as ofp:
                 toelis.write(ofp, clusters)
-            log.info("- saved %d spikes to '%s'", toelis.count(clusters), outfile)
+                log.info("- saved %d spikes to '%s'", toelis.count(clusters), outfile)
         return
 
     if args.recording.is_file():
@@ -480,12 +626,19 @@ def group_spikes_script(argv=None):
         datafile = nbank.find_resource(
             str(args.recording), registry_url=nbank.default_registry
         )
+
     log.info("- splitting '%s' into trials:", datafile)
     with h5.File(datafile, "r") as afp:
         trials = pd.DataFrame(
-            oeaudio_to_trials(afp, stim_finder, args.sync,
-                              args.sync_thresh, args.prepad,
-                              stimulus_lookup, recording_interval)
+            oeaudio_to_trials(
+                afp,
+                stim_finder,
+                args.sync,
+                args.sync_thresh,
+                args.prepad,
+                recording_interval,
+                oeaudio_log=args.oeaudio_log,
+            )
         )
         entry_attrs = tuple(entry_metadata(e) for _, e in iter_entries(afp))
 
@@ -552,10 +705,12 @@ def group_spikes_script(argv=None):
             cluster = cluster[included]
             waveforms = waveforms[included]
             log.info("    - %d artifact spike(s) excluded", n_spikes - n_included)
-        # aggregate spikes by trial and left join to trial information table
-        # - empty trials will be nan
+            # aggregate spikes by trial and left join to trial information table
+            # - empty trials will be nan
         clust_trials = trials.join(
-            cluster.groupby("trial").apply(lambda x: x.time.to_numpy()).rename("events")
+            cluster.groupby("trial")
+            .apply(lambda x: x.time.to_numpy(), include_groups=False)
+            .rename("events")
         )
         total_spikes += n_spikes
         total_clusters += 1

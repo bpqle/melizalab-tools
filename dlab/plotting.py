@@ -1,11 +1,10 @@
 # -*- mode: python -*-
-"""Common functions for plotting things. 
+"""Common functions for plotting things.
 
 Functions in this module should take matplotlib axes as their first argument,
 but there is no direct import of matplotlib.
 
 """
-from typing import Tuple
 
 import numpy as np
 
@@ -17,9 +16,9 @@ def spectrogram(
     *,
     window_s: float = 0.020,
     shift_s: float = 0.010,
-    frequency_range: Tuple[float, float] = (700, 10000),
+    frequency_range: tuple[float, float] = (700, 10000),
     compression: float = 0.1,
-    **plot_kwargs
+    **plot_kwargs,
 ):
     """Plot a spectrogram of a signal, with some useful defaults for birdsong"""
     from math import ceil, log
@@ -40,7 +39,7 @@ def spectrogram(
         aspect="auto",
         origin="lower",
         extent=(t[0], t[-1], f[0], f[-1]),
-        **plot_kwargs
+        **plot_kwargs,
     )
 
 

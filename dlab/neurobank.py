@@ -1,39 +1,45 @@
 # -*- mode: python -*-
-"""Functions for interfacing with the neurobank repository """
+"""Functions for interfacing with the neurobank repository"""
+
 import concurrent.futures
+import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Dict, Iterator, Sequence, Tuple, Union
 from urllib.parse import urlparse
 
 from httpx import Client, HTTPStatusError, NetRCAuth
 from nbank import registry, util
 from nbank.archive import resolve_extension
-from nbank.core import deposit, describe
-from nbank.script import log_error
+from nbank.core import deposit, describe, describe_many
+from nbank.registry import log_error
 
 from dlab import cache
 
 log = logging.getLogger(__name__)
 default_registry = registry.default_registry()
-default_auth = NetRCAuth(None)
+try:
+    default_auth = NetRCAuth(None)
+except FileNotFoundError:
+    default_auth = None
 
-MaybeResourcePath = Tuple[str, Union[Path, FileNotFoundError]]
+MaybeResourcePath = tuple[str, Path | FileNotFoundError]
+MaybeResourceMetadata = tuple[str, dict | FileNotFoundError]
 
 
 def find_resources(
     *resource_ids: str,
-    registry_url: str = default_registry,
-    alt_base: Union[Path, str, None] = None,
+    registry_url: str | None = default_registry,
+    alt_base: Path | str | None = None,
     no_download: bool = False,
 ) -> Iterator[MaybeResourcePath]:
-    """Locate resources using neurobank.
+    """Locate resources using neurobank or a local directory.
 
     This function will try to locate resources from the following locations:
     - a local directory (alt_base, if set),
-    - a local neurobank archive (using alt_base, if provided),
-    - a local cache
-    - a remote HTTP archive (caching the file for local access later)
+    - a local neurobank archive (using registry_url and alt_base, if provided),
+    - a local cache of previously fetched resources
+    - a remote HTTP archive (using registry_url, caching the file for local access later)
 
     Yields results as they become available. The result for each requested id is
     a Path if the resource was successfully located, or exist, or a
@@ -42,8 +48,9 @@ def find_resources(
     """
     to_locate = set(resource_ids)
     if alt_base is not None:
+        path = Path(alt_base)
         for resource_id in resource_ids:
-            stem = Path(alt_base) / resource_id
+            stem = path / resource_id
             try:
                 yield (resource_id, resolve_extension(stem))
                 to_locate.remove(resource_id)
@@ -59,7 +66,7 @@ def find_resources(
             executor.submit(
                 fetch_resource,
                 client,
-                resource["locations"],
+                resource,
                 alt_base=alt_base,
                 no_download=no_download,
             ): resource["name"]
@@ -81,7 +88,7 @@ def find_resource(
     resource_id: str,
     *,
     registry_url: str = default_registry,
-    alt_base: Union[Path, str, None] = None,
+    alt_base: Path | str | None = None,
     no_download: bool = False,
 ) -> Path:
     """Locate a resource using neurobank. This is a convenience wrapper for find_resources"""
@@ -99,9 +106,9 @@ def find_resource(
 
 def fetch_resource(
     client: Client,
-    locations: Sequence[Dict],
+    resource: dict,
     *,
-    alt_base: Union[Path, str, None] = None,
+    alt_base: Path | str | None = None,
     no_download: bool = False,
 ) -> Path:
     """Fetch a resource.
@@ -110,45 +117,73 @@ def fetch_resource(
     will try to locate the file, prioritizing local archives.
 
     """
-    # search for local files
-    for loc in locations:
-        if loc["scheme"] not in registry._local_schemes:
-            continue
-        stem = util.parse_location(loc, alt_base)
-        try:
-            target = resolve_extension(stem)
-            log.debug("%s: found in local repository", loc["resource_name"])
-            return target
-        except FileNotFoundError:
-            pass
-    for loc in locations:
-        if loc["scheme"] in registry._local_schemes:
-            continue
-        resource_id = loc["resource_name"]
-        url = util.parse_location(loc)
-        target = cache.locate(resource_id, Path(urlparse(url).netloc) / "resources")
-        if target.exists():
-            log.debug("%s: found in local cache", resource_id)
-            return target
-        if no_download:
-            continue
-        log.debug("%s: fetching from registry", resource_id)
-        with client.stream("GET", url) as response:
-            if response.status_code != 200:
-                log.warning(
-                    "%s: not available at %s (http status %d)",
-                    resource_id,
-                    url,
-                    response.status_code,
-                )
+    resource_id = resource["name"]
+    filename = resource.get("filename", resource_id)
+    for location in resource["locations"]:
+        loc = util.parse_location(location, alt_base=alt_base, http_session=client)
+        if hasattr(loc, "path"):
+            log.debug("- found in local repository: %s", location)
+            return loc.path
+        elif hasattr(loc, "url"):
+            target = cache.locate(
+                filename, Path(urlparse(loc.url).netloc) / "resources"
+            )
+            if target.exists():
+                log.debug("- found in local cache: %s", target)
+                return target
+            if no_download:
+                log.debug("- found at %s but configured not to download", loc.url)
                 continue
-            with target.open("wb") as fp:
-                for data in response.iter_bytes():
-                    fp.write(data)
-            return target
+            log.debug("- fetching from %s", loc.url)
+            try:
+                return loc.fetch(target)
+            except HTTPStatusError as err:
+                log.warning(
+                    "%s: failed to retrieve from %s (http status %d)",
+                    resource_id,
+                    loc.url,
+                    err.response.status_code,
+                )
     raise FileNotFoundError(
         "resource not found in local archive, cache, or downloadable remote"
     )
+
+
+def describe_resources(
+    *resource_ids: str,
+    registry_url: str | None = default_registry,
+    alt_base: Path | str | None = None,
+) -> Iterator[MaybeResourceMetadata]:
+    """Fetch resource metadata using neurobank or a local directory.
+
+    This function will try to load resource metadta from the following locations:
+    - a local directory (alt_base, if set),
+    - a remote neurobank registry
+
+    Yields results as they become available. The result for each requested id is
+    a dict if the metadata was successfully loaded or FileNotFoundError if the resource cannot be located.
+
+    """
+    to_locate = set(resource_ids)
+    if alt_base is not None:
+        alt_base = Path(alt_base)
+        for resource_id in resource_ids:
+            path = (alt_base / resource_id).with_suffix(".json")
+            if path.exists():
+                yield (resource_id, json.loads(path.read_text()))
+                to_locate.remove(resource_id)
+                log.debug("%s: found in alt_base", resource_id)
+    if len(to_locate) == 0:
+        return
+    try:
+        for result in describe_many(registry_url, *to_locate):
+            yield (result["name"], result)
+    except Exception:
+        for name in to_locate:
+            yield (
+                name,
+                FileNotFoundError("not found in local dir, unable to access registry"),
+            )
 
 
 def add_registry_argument(parser, dest="registry_url"):
@@ -158,7 +193,7 @@ def add_registry_argument(parser, dest="registry_url"):
         "--registry",
         dest=dest,
         help="URL of the registry service. "
-        "Default is to use the environment variable '%s'" % registry._env_registry,
+        f"Default is to use the environment variable '{registry._env_registry}'",
         default=default_registry,
     )
 
@@ -203,6 +238,7 @@ __all__ = [
     "default_registry",
     "deposit",
     "describe",
+    "describe_resources",
     "fetch_resource",
     "find_resource",
     "find_resources",

@@ -1,9 +1,9 @@
 # -*- mode: python -*-
-""" Local cache, primarily for storing neurobank resources """
+"""Local cache, primarily for storing neurobank resources"""
+
 import logging
 from pathlib import Path
 from shutil import rmtree
-from typing import Union
 
 import appdirs
 
@@ -13,7 +13,7 @@ user_dir = appdirs.user_cache_dir(APP_NAME, APP_AUTHOR)
 log = logging.getLogger(__name__)
 
 
-def locate(name: Union[Path, str], subdir: Union[Path, str]) -> Path:
+def locate(name: Path | str, subdir: Path | str) -> Path:
     """Return Path for a cached resource, creating subdir in the cache if needed"""
     cache_dir = Path(user_dir) / subdir
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -23,5 +23,5 @@ def locate(name: Union[Path, str], subdir: Union[Path, str]) -> Path:
 def clear(subdir: str) -> None:
     """Clear the contents of the cache"""
     cache_dir = Path(user_dir) / subdir
-    log.debug("clearing local cache dir %s:", cache_dir)
+    log.info("clearing local cache dir %s", cache_dir)
     rmtree(cache_dir, ignore_errors=True)
