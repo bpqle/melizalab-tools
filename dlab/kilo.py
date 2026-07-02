@@ -1,8 +1,8 @@
 # -*- mode: python -*-
 """Functions for using kilosort/phy data"""
 
-import io
 import datetime
+import io
 import json
 import logging
 import re
@@ -397,7 +397,7 @@ def group_spikes_script(argv=None):
     from dlab import __version__
     from dlab.util import json_serializable, setup_log
 
-    version = "2026.06.22"
+    version = "2026.07.02"
 
     p = argparse.ArgumentParser(
         description="group kilosorted spikes into pprox files based on cluster and trial"
