@@ -624,6 +624,9 @@ def group_spikes_script(argv=None):
         spikes = cluster[
             (cluster.time > n_before) & (cluster.time < (nsamples - n_after))
         ]
+        if len(spikes) < len(cluster):
+            log.info("    - %d spike(s) with insufficient samples excluded", len(cluster) - len(spikes))
+            n_spikes = len(spikes)
         waveforms = qs.peaks(
             recording[:, clust_info["ch"]],
             spikes.time,
@@ -639,13 +642,13 @@ def group_spikes_script(argv=None):
             log.warning("   - all spikes marked as artifacts (sorting error?)")
             continue
         elif n_included < n_spikes:
-            cluster = cluster[included]
+            spikes = spikes[included]
             waveforms = waveforms[included]
             log.info("    - %d artifact spike(s) excluded", n_spikes - n_included)
             # aggregate spikes by trial and left join to trial information table
             # - empty trials will be nan
         clust_trials = trials.join(
-            cluster.groupby("trial")
+            spikes.groupby("trial")
             .apply(lambda x: x.time.to_numpy(), include_groups=False)
             .rename("events")
         )
@@ -684,7 +687,7 @@ def group_spikes_script(argv=None):
                     outfile,
                     SpikeWaveforms(
                         waveforms,
-                        cluster.time.to_numpy(),
+                        spikes.time.to_numpy(),
                         params["sampling_rate"],
                         n_before,
                     ),
