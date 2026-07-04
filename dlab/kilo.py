@@ -548,7 +548,7 @@ def group_spikes_script(argv=None):
     log.info("    - %d samples, %d channels", nsamples, nchannels)
     if args.cluster is not None:
         log.info("- only analyzing clusters: %s", args.cluster)
-        events = events[events.clust == args.cluster]
+        events = events[events.clust.isin(args.cluster)]
 
     # find duplicates - this is rare but needs to be caught
     duplicates = events.duplicated()
