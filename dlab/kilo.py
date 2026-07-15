@@ -548,7 +548,7 @@ def group_spikes_script(argv=None):
     log.info("    - %d samples, %d channels", nsamples, nchannels)
     if args.cluster is not None:
         log.info("- only analyzing clusters: %s", args.cluster)
-        events = events[events.cluster == args.cluster]
+        events = events[events.clust.isin(args.cluster)]
 
     # find duplicates - this is rare but needs to be caught
     duplicates = events.duplicated()
@@ -624,6 +624,7 @@ def group_spikes_script(argv=None):
         spikes = cluster[
             (cluster.time > n_before) & (cluster.time < (nsamples - n_after))
         ]
+        n_clean = len(spikes)
         waveforms = qs.peaks(
             recording[:, clust_info["ch"]],
             spikes.time,
@@ -635,17 +636,23 @@ def group_spikes_script(argv=None):
             np.abs(mean_spike).max(-1) * args.artifact_reject_thresh
         )
         n_included = included.sum()
-        if n_included == 0:
-            log.warning("   - all spikes marked as artifacts (sorting error?)")
-            continue
-        elif n_included < n_spikes:
-            cluster = cluster[included]
+
+        if (n_clean < n_spikes) & (n_clean > n_spikes-2) :
+            log.info("    - %d spike(s) with insufficient samples excluded.", n_spikes - n_clean)
+        if (n_included < n_clean) & (n_included > n_clean/2):
+            spikes = spikes[included]
             waveforms = waveforms[included]
             log.info("    - %d artifact spike(s) excluded", n_spikes - n_included)
-            # aggregate spikes by trial and left join to trial information table
-            # - empty trials will be nan
+
+        if (n_included < n_clean/2) | (n_clean < n_spikes-2):
+            log.warning("    - too many spikes in cluster %d excluded as artifact or tail spikes. Recheck sorting data.", clust_id)
+            input("group-kilo-spikes will skip this unit. Press any key to continue.")
+            continue
+
+        # aggregate spikes by trial and left join to trial information table
+        # - empty trials will be nan
         clust_trials = trials.join(
-            cluster.groupby("trial")
+            spikes.groupby("trial")
             .apply(lambda x: x.time.to_numpy(), include_groups=False)
             .rename("events")
         )
@@ -684,7 +691,7 @@ def group_spikes_script(argv=None):
                     outfile,
                     SpikeWaveforms(
                         waveforms,
-                        cluster.time.to_numpy(),
+                        spikes.time.to_numpy(),
                         params["sampling_rate"],
                         n_before,
                     ),
