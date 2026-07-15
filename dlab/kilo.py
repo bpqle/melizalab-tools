@@ -397,7 +397,7 @@ def group_spikes_script(argv=None):
     from dlab import __version__
     from dlab.util import json_serializable, setup_log
 
-    version = "2026.07.02"
+    version = "2026.07.15"
 
     p = argparse.ArgumentParser(
         description="group kilosorted spikes into pprox files based on cluster and trial"
@@ -637,15 +637,21 @@ def group_spikes_script(argv=None):
         )
         n_included = included.sum()
 
-        if (n_clean < n_spikes) & (n_clean > n_spikes-2) :
-            log.info("    - %d spike(s) with insufficient samples excluded.", n_spikes - n_clean)
-        if (n_included < n_clean) & (n_included > n_clean/2):
+        if (n_clean < n_spikes) & (n_clean > n_spikes - 2):
+            log.info(
+                "    - %d spike(s) with insufficient samples excluded.",
+                n_spikes - n_clean,
+            )
+        if (n_included < n_clean) & (n_included > n_clean / 2):
             spikes = spikes[included]
             waveforms = waveforms[included]
             log.info("    - %d artifact spike(s) excluded", n_spikes - n_included)
 
-        if (n_included < n_clean/2) | (n_clean < n_spikes-2):
-            log.warning("    - too many spikes in cluster %d excluded as artifact or tail spikes. Recheck sorting data.", clust_id)
+        if (n_included < n_clean / 2) | (n_clean < n_spikes - 2):
+            log.warning(
+                "    - too many spikes in cluster %d excluded as artifact or tail spikes. Recheck sorting data.",
+                clust_id,
+            )
             input("group-kilo-spikes will skip this unit. Press any key to continue.")
             continue
 
