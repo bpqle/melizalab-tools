@@ -337,7 +337,10 @@ def oeaudio_to_trials(
                 opto_trial = True
                 opto_onset = opto_onsets[(opto_onsets>onset)&(opto_onsets<offset)][0]
                 opto_offset = opto_offsets[(opto_offsets>onset)&(opto_offsets<offset)][0]
-
+            else:
+                opto_trial = False
+                opto_onset, opto_offset = [0,0]
+                
             trials.append(
                 Trial(
                     entry_num,
