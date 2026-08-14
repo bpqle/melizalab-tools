@@ -43,6 +43,7 @@ Homepage = "https://github.com/melizalab/melizalab-tools"
 
 [project.scripts]
 group-kilo-spikes = "dlab.kilo:group_spikes_script"
+group-klopto-spikes = "dlab.kilopto:group_spikes_script"
 get-songs = "dlab.get_songs:script"
 
 [project.optional-dependencies]
