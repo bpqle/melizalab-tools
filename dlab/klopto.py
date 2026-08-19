@@ -247,20 +247,19 @@ def oeaudio_to_trials(
                 f"unable to find sync track. Use --sync to configure. Options are: {available_tracks}"
             ) from err
 
-        son_det = qs.detector(sync_thresh, 10)
+        stim_det = qs.detector(sync_thresh, 10)
         sync_data = sync[:].astype("d")
-        son_det.scale_thresh(sync_data.mean(), sync_data.std())
-        stim_onsets = np.asarray(son_det(sync_data))
-
-        soff_det = qs.detector(sync_thresh, 10)
-        sync_data_1 = sync[:].astype("d") * -1
-        det.scale_thresh(sync_data_1.mean(), sync_data_1.std())
-        stim_offsets = np.asarray(soff_det(sync_data_1))
-        
-        assert stim_onsets.size==stim_offsets.size
-        assert all(np.diff(stim_offsets, stim_onsets) > 0)
-        log.info("    - detected %d onset clicks", stim_onsets.size)
-        log.info("    - detected %d offset clicks", stim_offsets.size)
+        sync_diff = np.diff(sync_data)
+        stim_det.scale_thresh(sync_diff.mean(), sync_diff.std())
+        stim_pks = np.asarray(stim_det(sync_diff))
+        stim_peaks = np.delete(stim_pks, np.argwhere(
+            # debounce square wave diff peaks
+            np.ediff1d(stim_pks, to_begin=55) <= 50
+        ))
+        log.info("    - detected %d onset & offset stimuli clicks", stim_peaks.size)
+        assert stim_peaks.size % 2 == 0, 'number of clicks not matching onset-offset pairs'
+        stim_onsets = stim_peaks[::2]
+        stim_offsets = stim_peaks[1::2]
 
         dset_offset = sync.attrs["offset"]
         dset_end = sync.size
@@ -275,19 +274,19 @@ def oeaudio_to_trials(
             raise RuntimeError(
                 f"unable to find opto sync track {opto_sync_dset}. Check your recording ARF file."
             ) from err
-        opto_on_det = qs.detector(sync_thresh, 10)
-        opto_data = opto_sync[:].astype("d")
-        opto_on_det.scale_thresh(opto_data.mean(), opto_data.std())
-        opto_onsets = np.asarray(opto_on_det(opto_data))
-
-        opto_off_det = qs.detector(sync_thresh, 10)
-        opto_data_1 = opto_sync[:].astype("d") * -1
-        opto_off_det.scale_thresh(opto_data_1.mean(), opto_data_1.std())
-        opto_offsets = np.asarray(opto_off_det(opto_data_1))
-        assert opto_onsets.size == opto_offsets.size
-        assert all(np.diff(opto_offsets, opto_onsets) > 0)
-        log.info("    - detected %d onset opto clicks", opto_onsets.size)
-        log.info("    - detected %d offset opto clicks", opto_offsets.size)
+        opto_det = qs.detector(sync_thresh, 10)
+        opt_sync_data = opto_sync[:].astype("d")
+        opto_diff = np.diff(opt_sync_data)
+        opto_det.scale_thresh(opto_diff.mean(), opto_diff.std())
+        opto_pks = np.asarray(opto_det(opto_diff))
+        opto_peaks = np.delete(opto_pks, np.argwhere(
+            # debounce square wave diff peaks
+            np.ediff1d(opto_pks, to_begin=55) <= 50 
+        ))
+        log.info("    - detected %d onset & offset opto clicks", opto_peaks.size)
+        assert opto_peaks.size % 2 == 0, 'number of clicks not matching onset-offset pairs'
+        opto_onsets = opto_peaks[::2]
+        opto_offsets = opto_peaks[1::2]
         
         if oeaudio_log is not None:
             log.info("  - parsing stimulus log from %s", oeaudio_log)
@@ -309,49 +308,51 @@ def oeaudio_to_trials(
                 "unable to find a stimulus to look up duration. Was it deposited in neurobank?"
             ) from err
         log.info("    - detected %d stimuli", len(entry_stimuli))
-
+        
         entry_stimuli = match_clicks(entry_stimuli, stim_onsets)
 
         padding_samples = int(prepad * sampling_rate)
-        for stim, onset, offset, stim_off in zip_longest(
+        for stim, stim_on, trial_off, stim_off in zip_longest(
             entry_stimuli,
             stim_onsets,
-            stim_onsets[1:],
+            stim_onsets[1:]
             stim_offsets,
             fillvalue=dset_end + padding_samples,
         ):
             stim_seconds = stim_durations[stim.name]
             stim_samples = int(stim_seconds * sampling_rate)
-            if stim_samples > offset - onset:
+            if stim_samples > trial_off - stim_on:
                 log.warning(
-                    "  - WARNING: stimulus %s is longer than the duration of the trial",
-                    stim,
+                    "  - WARNING: stimulus %s is longer than the duration of the trial %s",
+                    stim, trial_off-stim_on
                 )
-            elif stim_samples > stim_off - onset:
+            elif stim_samples > stim_off - stim_on:
                 log.warning(
                     "  - WARNING: stimulus %s is longer than the duration of click %s",
-                    stim, stim_off-onset
+                    stim, stim_off-stim_on
                 )
 
-            if opto_onsets[(opto_onsets>onset)&(opto_onsets<offset)].size == 1:
+            if opto_onsets[(opto_onsets>=onset)&(opto_onsets<=offset)].size == 1:
                 opto_trial = True
-                opto_onset = opto_onsets[(opto_onsets>onset)&(opto_onsets<offset)][0]
-                opto_offset = opto_offsets[(opto_offsets>onset)&(opto_offsets<offset)][0]
+                opto_on = opto_onsets[(opto_onsets>=stim_on)&\
+                                      (opto_onsets<=trial_off)][0]
+                opto_off = opto_offsets[(opto_offsets>=stim_on)&\
+                                        (opto_offsets<=trial_off)][0]
             else:
                 opto_trial = False
-                opto_onset, opto_offset = [0,0]
+                opto_on, opto_off = [0,0]
                 
             trials.append(
                 Trial(
                     entry_num,
-                    onset - padding_samples,
-                    offset - padding_samples,
+                    stim_onset - padding_samples, # recording_start
+                    trial_off - padding_samples, # recording_end
                     stim.name,
-                    onset,
+                    stim_on,
                     stim_off,
                     opto_trial,
-                    opto_onset,
-                    opto_offset
+                    opto_on,
+                    opto_off
                 )
             )
     return trials
