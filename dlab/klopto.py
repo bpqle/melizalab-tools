@@ -69,6 +69,8 @@ def oeaudio_stims(dset: h5.Dataset) -> Iterator[Stimulus]:
 
     """
     re_start = re.compile(r"start (.*)")
+    # deals with duplicated start messages
+    dataset = np.unique(dset[:])
     for row in dset:
         time = row["start"]
         message = row["message"].decode("utf-8")
@@ -315,7 +317,7 @@ def oeaudio_to_trials(
         for stim, stim_on, trial_off, stim_off in zip_longest(
             entry_stimuli,
             stim_onsets,
-            stim_onsets[1:]
+            stim_onsets[1:],
             stim_offsets,
             fillvalue=dset_end + padding_samples,
         ):
