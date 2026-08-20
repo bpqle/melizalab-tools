@@ -70,15 +70,17 @@ def oeaudio_stims(dset: h5.Dataset) -> Iterator[Stimulus]:
     """
     re_start = re.compile(r"start (.*)")
     # deals with duplicated start messages
-    dataset = np.unique(dset[:])
-    for row in dset:
+    prev_msg = ''
+    for row in dataset:
         time = row["start"]
         message = row["message"].decode("utf-8")
         m = re_start.match(message)
-        if m is not None:
+        if (m is not None)&(message!=prev_msg):
             stim_name = Path(m.group(1)).stem
+            prev_msg = message
             yield Stimulus(stim_name, time)
-
+        elif m is not None:
+            prev_msg = ''
 
 def oeaudio_log_stims(
     oeaudio_log: io.TextIOBase, sampling_rate: int
@@ -314,41 +316,46 @@ def oeaudio_to_trials(
         entry_stimuli = match_clicks(entry_stimuli, stim_onsets)
 
         padding_samples = int(prepad * sampling_rate)
-        for stim, stim_on, trial_off, stim_off in zip_longest(
+        for stim, stim_on, stim_on_next, stim_off in zip_longest(
             entry_stimuli,
             stim_onsets,
             stim_onsets[1:],
             stim_offsets,
             fillvalue=dset_end + padding_samples,
         ):
+            trial_on = stim_on - padding_samples
+            trial_off = stim_on_next - padding_samples
             stim_seconds = stim_durations[stim.name]
             stim_samples = int(stim_seconds * sampling_rate)
-            if stim_samples > trial_off - stim_on:
+            if stim_samples > stim_on_next - stim_on:
                 log.warning(
                     "  - WARNING: stimulus %s is longer than the duration of the trial %s",
-                    stim, trial_off-stim_on
+                    stim, stim_on_next-stim_on
                 )
+            # seems to happen a lot
             elif stim_samples > stim_off - stim_on:
                 log.warning(
                     "  - WARNING: stimulus %s is longer than the duration of click %s",
                     stim, stim_off-stim_on
                 )
 
-            if opto_onsets[(opto_onsets>=onset)&(opto_onsets<=offset)].size == 1:
+            opt_trigs = opto_onsets[(opto_onsets>=trial_on)&(opto_onsets<=trial_off)]
+            if opt_trigs.size >= 1:
                 opto_trial = True
-                opto_on = opto_onsets[(opto_onsets>=stim_on)&\
-                                      (opto_onsets<=trial_off)][0]
-                opto_off = opto_offsets[(opto_offsets>=stim_on)&\
-                                        (opto_offsets<=trial_off)][0]
+                opto_on = opto_onsets[(opto_onsets>=trial_on)&\
+                                      (opto_onsets<=trial_off)]
+                opto_off = opto_offsets[(opto_offsets>=trial_on)&\
+                                        (opto_offsets<=trial_off)]
             else:
                 opto_trial = False
-                opto_on, opto_off = [0,0]
+                opto_on = [0]
+                opto_off = [0]
                 
             trials.append(
                 Trial(
                     entry_num,
-                    stim_onset - padding_samples, # recording_start
-                    trial_off - padding_samples, # recording_end
+                    trial_on, # recording_start
+                    trial_off, # recording_end
                     stim.name,
                     stim_on,
                     stim_off,
@@ -437,6 +444,11 @@ def trials_to_pprox(trials: pd.DataFrame, sampling_rate: float):
                     (trial.stimulus_end - trial.stimulus_start) / sampling_rate,
                 ),
             },
+            "stimulation": {
+                "opto_trial": trial.opto_trial,
+                "led_on": (trial.opto_on.astype("d") - trial.stimulus_start) / sampling_rate,
+                "led_off": (trial.opto_off.astype("d") - trial.stimulus_start) / sampling_rate,
+            }
             "recording": {
                 "entry": trial.recording_entry,
                 "start": trial.recording_start,
