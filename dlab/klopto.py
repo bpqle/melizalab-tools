@@ -316,11 +316,10 @@ def oeaudio_to_trials(
         entry_stimuli = match_clicks(entry_stimuli, stim_onsets)
 
         padding_samples = int(prepad * sampling_rate)
-        for stim, stim_on, stim_on_next, stim_off in zip_longest(
+        for stim, stim_on, stim_on_next in zip_longest(
             entry_stimuli,
             stim_onsets,
             stim_onsets[1:],
-            stim_offsets,
             fillvalue=dset_end + padding_samples,
         ):
             trial_on = stim_on - padding_samples
@@ -331,12 +330,6 @@ def oeaudio_to_trials(
                 log.warning(
                     "  - WARNING: stimulus %s is longer than the duration of the trial %s",
                     stim, stim_on_next-stim_on
-                )
-            # seems to happen a lot
-            elif stim_samples > stim_off - stim_on:
-                log.warning(
-                    "  - WARNING: stimulus %s is longer than the duration of click %s",
-                    stim, stim_off-stim_on
                 )
 
             opt_trigs = opto_onsets[(opto_onsets>=trial_on)&(opto_onsets<=trial_off)]
@@ -358,7 +351,7 @@ def oeaudio_to_trials(
                     trial_off, # recording_end
                     stim.name,
                     stim_on,
-                    stim_off,
+                    stim_on+stim_samples,
                     opto_trial,
                     opto_on,
                     opto_off
@@ -445,10 +438,10 @@ def trials_to_pprox(trials: pd.DataFrame, sampling_rate: float):
                 ),
             },
             "opto": {
-                "led": trial.opto_trial,
-                "led_start": (trial.opto_on.astype("d") - trial.stimulus_start) / sampling_rate,
-                "led_end": (trial.opto_off.astype("d") - trial.stimulus_start) / sampling_rate,
-            }
+                "led": trial.opto,
+                "led_start": (trial.opto_start.astype("d") - trial.stimulus_start) / sampling_rate,
+                "led_end": (trial.opto_end.astype("d") - trial.stimulus_start) / sampling_rate,
+            },
             "recording": {
                 "entry": trial.recording_entry,
                 "start": trial.recording_start,
