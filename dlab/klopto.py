@@ -71,7 +71,7 @@ def oeaudio_stims(dset: h5.Dataset) -> Iterator[Stimulus]:
     re_start = re.compile(r"start (.*)")
     # deals with duplicated start messages
     prev_msg = ''
-    for row in dataset:
+    for row in dset:
         time = row["start"]
         message = row["message"].decode("utf-8")
         m = re_start.match(message)
@@ -348,8 +348,8 @@ def oeaudio_to_trials(
                                         (opto_offsets<=trial_off)]
             else:
                 opto_trial = False
-                opto_on = [0]
-                opto_off = [0]
+                opto_on = np.zeros(1)
+                opto_off = np.zeros(1)
                 
             trials.append(
                 Trial(
@@ -444,10 +444,10 @@ def trials_to_pprox(trials: pd.DataFrame, sampling_rate: float):
                     (trial.stimulus_end - trial.stimulus_start) / sampling_rate,
                 ),
             },
-            "stimulation": {
-                "opto_trial": trial.opto_trial,
-                "led_on": (trial.opto_on.astype("d") - trial.stimulus_start) / sampling_rate,
-                "led_off": (trial.opto_off.astype("d") - trial.stimulus_start) / sampling_rate,
+            "opto": {
+                "led": trial.opto_trial,
+                "led_start": (trial.opto_on.astype("d") - trial.stimulus_start) / sampling_rate,
+                "led_end": (trial.opto_off.astype("d") - trial.stimulus_start) / sampling_rate,
             }
             "recording": {
                 "entry": trial.recording_entry,
