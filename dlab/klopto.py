@@ -70,17 +70,13 @@ def oeaudio_stims(dset: h5.Dataset) -> Iterator[Stimulus]:
     """
     re_start = re.compile(r"start (.*)")
     # deals with duplicated start messages
-    prev_msg = ''
     for row in dset:
         time = row["start"]
         message = row["message"].decode("utf-8")
         m = re_start.match(message)
-        if (m is not None)&(message!=prev_msg):
+        if m is not None:
             stim_name = Path(m.group(1)).stem
-            prev_msg = message
             yield Stimulus(stim_name, time)
-        elif m is not None:
-            prev_msg = ''
 
 def oeaudio_log_stims(
     oeaudio_log: io.TextIOBase, sampling_rate: int
@@ -253,17 +249,17 @@ def oeaudio_to_trials(
 
         stim_det = qs.detector(sync_thresh, 10)
         sync_data = sync[:].astype("d")
-        sync_diff = np.diff(sync_data)
+        sync_diff = np.diff(sync_data, prepend=0)
         stim_det.scale_thresh(sync_diff.mean(), sync_diff.std())
         stim_pks = np.asarray(stim_det(sync_diff))
-        stim_peaks = np.delete(stim_pks, np.argwhere(
-            # debounce square wave diff peaks
-            np.ediff1d(stim_pks, to_begin=55) <= 50
-        ))
         log.info("    - detected %d onset & offset stimuli clicks", stim_peaks.size)
-        assert stim_peaks.size % 2 == 0, 'number of clicks not matching onset-offset pairs'
-        stim_onsets = stim_peaks[::2]
-        stim_offsets = stim_peaks[1::2]
+        ## This code is necessary if square wave has jitter at offset
+        # stim_peaks = np.delete(stim_pks, np.argwhere(
+        #     # debounce square wave diff peaks
+        #     np.ediff1d(stim_pks, to_begin=55) <= 50
+        # ))
+        # stim_onsets = stim_peaks[::2]
+        # stim_offsets = stim_peaks[1::2]
 
         dset_offset = sync.attrs["offset"]
         dset_end = sync.size
@@ -280,17 +276,15 @@ def oeaudio_to_trials(
             ) from err
         opto_det = qs.detector(sync_thresh, 10)
         opt_sync_data = opto_sync[:].astype("d")
-        opto_diff = np.diff(opt_sync_data)
+        opto_diff = np.diff(opt_sync_data, prepend=0)
         opto_det.scale_thresh(opto_diff.mean(), opto_diff.std())
         opto_pks = np.asarray(opto_det(opto_diff))
-        opto_peaks = np.delete(opto_pks, np.argwhere(
-            # debounce square wave diff peaks
-            np.ediff1d(opto_pks, to_begin=55) <= 50 
-        ))
         log.info("    - detected %d onset & offset opto clicks", opto_peaks.size)
-        assert opto_peaks.size % 2 == 0, 'number of clicks not matching onset-offset pairs'
-        opto_onsets = opto_peaks[::2]
-        opto_offsets = opto_peaks[1::2]
+        # opto_peaks = np.delete(opto_pks, np.argwhere(
+        #     np.ediff1d(opto_pks, to_begin=55) <= 50 
+        # ))
+        # opto_onsets = opto_peaks[::2]
+        # opto_offsets = opto_peaks[1::2]
         
         if oeaudio_log is not None:
             log.info("  - parsing stimulus log from %s", oeaudio_log)
